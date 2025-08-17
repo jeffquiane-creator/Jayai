@@ -128,3 +128,6 @@ for _, row in rows.iterrows():
     if "AudioFile" in brokerage_df.columns and pd.notna(row["AudioFile"]) and os.path.exists(row["AudioFile"]):
         st.audio(row["AudioFile"])
     st.markdown("---")
+    # Right after loading objections_df
+st.write("📋 Objections dataset columns:", list(objections_df.columns))
+
