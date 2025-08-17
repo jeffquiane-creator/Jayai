@@ -1,72 +1,103 @@
-import streamlit as st
-import pandas as pd
-from gtts import gTTS
-import tempfile
-import os
+import React, { useState } from "react";
 
-# Load data
-@st.cache_data
-def load_data():
-    return pd.read_csv("agent_rebuttals.csv")
+const datasets = {
+  objections: [
+    { id: 1, objection: "I don’t want to pay $297/month", rebuttal: "If $297 got you 2 closings worth $10k+, would it be worth it?" },
+    { id: 2, objection: "I’m already paying for leads", rebuttal: "Zillow is retail. Our system is wholesale. Would you rather rent or own?" }
+  ],
+  faqs: [
+    { id: 1, question: "How many leads can I expect?", rebuttal: "75–100 a month on $300 budget, $3–$5/lead." },
+    { id: 2, question: "Are leads exclusive?", rebuttal: "Yes, ads run in your account. Leads are 100% yours." }
+  ]
+};
 
-df = load_data()
+export default function StringletApp() {
+  const [selectedSet, setSelectedSet] = useState("objections");
+  const [search, setSearch] = useState("");
+  const [favorites, setFavorites] = useState([]);
 
-# App Title
-st.title("Agent Objections & Rebuttals Library 🎯")
+  const currentData = datasets[selectedSet].filter(item =>
+    (item.objection || item.question).toLowerCase().includes(search.toLowerCase())
+  );
 
-# Selector at top (radio buttons)
-view_option = st.radio(
-    "Choose what you want to browse:",
-    ["Objections + Rebuttals", "SMS Snippets", "Email Subject Lines", "Email Bodies"]
-)
+  const toggleFavorite = (id) => {
+    setFavorites(prev =>
+      prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]
+    );
+  };
 
-# Display based on selection
-if view_option == "Objections + Rebuttals":
-    for idx, row in df.iterrows():
-        st.markdown(f"### ❓ Objection: {row['Objection']}")
-        st.markdown(f"**💡 Rebuttal:** {row['Rebuttal']}")
+  const copyText = (text) => {
+    navigator.clipboard.writeText(text);
+    alert("Copied to clipboard!");
+  };
 
-        col1, col2, col3 = st.columns([1,1,1])
+  const downloadText = (text, filename = "rebuttal.txt") => {
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
-        # Copy/download button
-        with col1:
-            st.code(row['Rebuttal'], language="text")
+  return (
+    <div style={{ fontFamily: "sans-serif", padding: 20 }}>
+      <h2>Agent Rebuttal Library</h2>
 
-        with col2:
-            st.download_button(
-                "⬇️ Download Rebuttal",
-                row['Rebuttal'],
-                file_name=f"rebuttal_{idx}.txt"
-            )
+      {/* Radio selector */}
+      <div style={{ marginBottom: 20 }}>
+        {Object.keys(datasets).map(key => (
+          <label key={key} style={{ marginRight: 15 }}>
+            <input
+              type="radio"
+              value={key}
+              checked={selectedSet === key}
+              onChange={() => setSelectedSet(key)}
+            />
+            {key.charAt(0).toUpperCase() + key.slice(1)}
+          </label>
+        ))}
+      </div>
 
-        # Audio playback using gTTS
-        with col3:
-            if st.button(f"🔊 Play Rebuttal #{idx}"):
-                tts = gTTS(row['Rebuttal'])
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmpfile:
-                    tts.save(tmpfile.name)
-                    audio_path = tmpfile.name
-                st.audio(audio_path, format="audio/mp3")
+      {/* Search box */}
+      <input
+        type="text"
+        placeholder="Search..."
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        style={{ width: "100%", padding: 8, marginBottom: 20 }}
+      />
 
-elif view_option == "SMS Snippets" and "SMS" in df.columns:
-    for idx, row in df.iterrows():
-        if pd.notna(row["SMS"]):
-            st.markdown(f"📱 **SMS #{idx}:** {row['SMS']}")
-            st.code(row["SMS"], language="text")
-            st.download_button(
-                "⬇️ Download SMS",
-                row["SMS"],
-                file_name=f"sms_{idx}.txt"
-            )
+      {/* List */}
+      <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid #ddd", padding: 10 }}>
+        {currentData.map(item => (
+          <div key={item.id} style={{ marginBottom: 20 }}>
+            <strong>{item.objection || item.question}</strong>
+            <p>{item.rebuttal}</p>
+            <button onClick={() => copyText(item.rebuttal)}>Copy</button>
+            <button onClick={() => downloadText(item.rebuttal)}>Download</button>
+            <button onClick={() => toggleFavorite(item.id)}>
+              {favorites.includes(item.id) ? "★ Unfavorite" : "☆ Favorite"}
+            </button>
+          </div>
+        ))}
+      </div>
 
-elif view_option == "Email Subject Lines" and "EmailSubject" in df.columns:
-    for idx, row in df.iterrows():
-        if pd.notna(row["EmailSubject"]):
-            st.markdown(f"✉️ **Subject #{idx}:** {row['EmailSubject']}")
-            st.code(row["EmailSubject"], language="text")
-
-elif view_option == "Email Bodies" and "EmailBody" in df.columns:
-    for idx, row in df.iterrows():
-        if pd.notna(row["EmailBody"]):
-            st.markdown(f"📧 **Email Body #{idx}:**")
-            st.write(row["EmailBody"])
+      {/* Favorites */}
+      {favorites.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          <h3>Favorites</h3>
+          {datasets[selectedSet]
+            .filter(item => favorites.includes(item.id))
+            .map(item => (
+              <div key={item.id}>
+                <strong>{item.objection || item.question}</strong>
+                <p>{item.rebuttal}</p>
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
