@@ -1,103 +1,57 @@
-import React, { useState } from "react";
+import streamlit as st
+import pandas as pd
 
-const datasets = {
-  objections: [
-    { id: 1, objection: "I don’t want to pay $297/month", rebuttal: "If $297 got you 2 closings worth $10k+, would it be worth it?" },
-    { id: 2, objection: "I’m already paying for leads", rebuttal: "Zillow is retail. Our system is wholesale. Would you rather rent or own?" }
-  ],
-  faqs: [
-    { id: 1, question: "How many leads can I expect?", rebuttal: "75–100 a month on $300 budget, $3–$5/lead." },
-    { id: 2, question: "Are leads exclusive?", rebuttal: "Yes, ads run in your account. Leads are 100% yours." }
-  ]
-};
+# Load dataset
+@st.cache_data
+def load_data(file):
+    return pd.read_excel(file)
 
-export default function StringletApp() {
-  const [selectedSet, setSelectedSet] = useState("objections");
-  const [search, setSearch] = useState("");
-  const [favorites, setFavorites] = useState([]);
+st.title("🚀 Funnel Pilot Rebuttal & Brokerage Hub")
 
-  const currentData = datasets[selectedSet].filter(item =>
-    (item.objection || item.question).toLowerCase().includes(search.toLowerCase())
-  );
+# Upload
+uploaded_file = st.file_uploader("Upload your dataset", type=["xlsx", "csv"])
 
-  const toggleFavorite = (id) => {
-    setFavorites(prev =>
-      prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]
-    );
-  };
+if uploaded_file:
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
 
-  const copyText = (text) => {
-    navigator.clipboard.writeText(text);
-    alert("Copied to clipboard!");
-  };
+    # Dataset selector
+    option = st.radio("Choose dataset view:", ["All", "Favorites"])
 
-  const downloadText = (text, filename = "rebuttal.txt") => {
-    const blob = new Blob([text], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+    # Search
+    search = st.text_input("Search for an objection/question")
+    if search:
+        df = df[df.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)]
 
-  return (
-    <div style={{ fontFamily: "sans-serif", padding: 20 }}>
-      <h2>Agent Rebuttal Library</h2>
+    # Initialize favorites in session state
+    if "favorites" not in st.session_state:
+        st.session_state["favorites"] = set()
 
-      {/* Radio selector */}
-      <div style={{ marginBottom: 20 }}>
-        {Object.keys(datasets).map(key => (
-          <label key={key} style={{ marginRight: 15 }}>
-            <input
-              type="radio"
-              value={key}
-              checked={selectedSet === key}
-              onChange={() => setSelectedSet(key)}
-            />
-            {key.charAt(0).toUpperCase() + key.slice(1)}
-          </label>
-        ))}
-      </div>
+    if option == "Favorites":
+        df = df[df.index.isin(st.session_state["favorites"])]
 
-      {/* Search box */}
-      <input
-        type="text"
-        placeholder="Search..."
-        value={search}
-        onChange={e => setSearch(e.target.value)}
-        style={{ width: "100%", padding: 8, marginBottom: 20 }}
-      />
+    # Display
+    for idx, row in df.iterrows():
+        st.markdown(f"**❌ {row.get('Objection', row.get('Question',''))}**")
+        st.write(row.get("Rebuttal", ""))
 
-      {/* List */}
-      <div style={{ maxHeight: 400, overflowY: "auto", border: "1px solid #ddd", padding: 10 }}>
-        {currentData.map(item => (
-          <div key={item.id} style={{ marginBottom: 20 }}>
-            <strong>{item.objection || item.question}</strong>
-            <p>{item.rebuttal}</p>
-            <button onClick={() => copyText(item.rebuttal)}>Copy</button>
-            <button onClick={() => downloadText(item.rebuttal)}>Download</button>
-            <button onClick={() => toggleFavorite(item.id)}>
-              {favorites.includes(item.id) ? "★ Unfavorite" : "☆ Favorite"}
-            </button>
-          </div>
-        ))}
-      </div>
+        col1, col2, col3 = st.columns(3)
 
-      {/* Favorites */}
-      {favorites.length > 0 && (
-        <div style={{ marginTop: 20 }}>
-          <h3>Favorites</h3>
-          {datasets[selectedSet]
-            .filter(item => favorites.includes(item.id))
-            .map(item => (
-              <div key={item.id}>
-                <strong>{item.objection || item.question}</strong>
-                <p>{item.rebuttal}</p>
-              </div>
-            ))}
-        </div>
-      )}
-    </div>
-  );
-}
+        with col1:
+            if st.button("📋 Copy", key=f"copy{idx}"):
+                st.write("✅ Copied (simulate clipboard here)")  # Streamlit can't directly copy to clipboard
+        with col2:
+            text = row.get("Rebuttal", "")
+            st.download_button("💾 Download", text, file_name=f"rebuttal_{idx}.txt")
+        with col3:
+            fav_label = "★ Unfavorite" if idx in st.session_state["favorites"] else "☆ Favorite"
+            if st.button(fav_label, key=f"fav{idx}"):
+                if idx in st.session_state["favorites"]:
+                    st.session_state["favorites"].remove(idx)
+                else:
+                    st.session_state["favorites"].add(idx)
+
+else:
+    st.warning("Please upload Agent_Objections_Rebuttals.xlsx or a CSV file.")
