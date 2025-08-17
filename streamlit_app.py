@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import pyttsx3
+from gtts import gTTS
 import tempfile
 import os
 
@@ -14,13 +14,13 @@ df = load_data()
 # App Title
 st.title("Agent Objections & Rebuttals Library 🎯")
 
-# Selector at top (radio buttons instead of slider)
+# Selector at top (radio buttons)
 view_option = st.radio(
     "Choose what you want to browse:",
     ["Objections + Rebuttals", "SMS Snippets", "Email Subject Lines", "Email Bodies"]
 )
 
-# Display content based on selection
+# Display based on selection
 if view_option == "Objections + Rebuttals":
     for idx, row in df.iterrows():
         st.markdown(f"### ❓ Objection: {row['Objection']}")
@@ -28,11 +28,10 @@ if view_option == "Objections + Rebuttals":
 
         col1, col2, col3 = st.columns([1,1,1])
 
-        # Copy button (Streamlit built-in hack)
+        # Copy/download button
         with col1:
             st.code(row['Rebuttal'], language="text")
 
-        # Download button
         with col2:
             st.download_button(
                 "⬇️ Download Rebuttal",
@@ -40,13 +39,12 @@ if view_option == "Objections + Rebuttals":
                 file_name=f"rebuttal_{idx}.txt"
             )
 
-        # Audio playback
+        # Audio playback using gTTS
         with col3:
             if st.button(f"🔊 Play Rebuttal #{idx}"):
-                engine = pyttsx3.init()
+                tts = gTTS(row['Rebuttal'])
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmpfile:
-                    engine.save_to_file(row['Rebuttal'], tmpfile.name)
-                    engine.runAndWait()
+                    tts.save(tmpfile.name)
                     audio_path = tmpfile.name
                 st.audio(audio_path, format="audio/mp3")
 
@@ -72,4 +70,3 @@ elif view_option == "Email Bodies" and "EmailBody" in df.columns:
         if pd.notna(row["EmailBody"]):
             st.markdown(f"📧 **Email Body #{idx}:**")
             st.write(row["EmailBody"])
-
