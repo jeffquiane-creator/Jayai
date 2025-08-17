@@ -113,3 +113,18 @@ for _, row in rows.iterrows():
     if "AudioFile" in brokerage_df.columns and pd.notna(row["AudioFile"]) and os.path.exists(row["AudioFile"]):
         st.audio(row["AudioFile"])
     st.markdown("---")
+# Debug: Show what columns exist in the brokerage dataset
+st.write("📊 Available columns in brokerage file:", list(brokerage_df.columns))
+
+choice = st.selectbox("Select a Brokerage", brokerage_df["Brokerage"].unique().tolist())
+
+rows = brokerage_df[brokerage_df["Brokerage"] == choice]
+
+st.subheader(f"{choice} vs FunnelPilot")
+for _, row in rows.iterrows():
+    for col in ["Benefit", "PowerStatement", "SMS", "Rebuttal"]:
+        if col in brokerage_df.columns and pd.notna(row[col]):
+            st.write(f"**{col}:** {row[col]}")
+    if "AudioFile" in brokerage_df.columns and pd.notna(row["AudioFile"]) and os.path.exists(row["AudioFile"]):
+        st.audio(row["AudioFile"])
+    st.markdown("---")
