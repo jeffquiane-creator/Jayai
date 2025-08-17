@@ -5,20 +5,23 @@ import os
 # --- Page Config ---
 st.set_page_config(page_title="Agent Objections & Brokerage Compare", layout="wide")
 
+# --- File paths (adjust if needed) ---
+OBJECTIONS_FILE = "Objection_Rebuttal_Master_500 (1).csv"
+BROKERAGE_FILE = "Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx"
+FUNNELPILOT_FILE = "Top_25_Brokerage_Rebuttals_FunnelPilot.xlsx"
+
 # --- Load Data ---
 @st.cache_data
-def load_data(file_path):
-    if file_path.endswith(".csv"):
-        return pd.read_csv(file_path)
-    elif file_path.endswith(".xlsx"):
-        return pd.read_excel(file_path)
-    return pd.DataFrame()
+def load_csv(file):
+    return pd.read_csv(file) if os.path.exists(file) else pd.DataFrame()
 
-objections_file = "agent_objections.xlsx"   # must have: Objection, Rebuttal, PowerStatement, SMS, AudioFile
-brokerages_file = "brokerage_comparison.xlsx"  # must have: Brokerage, Benefit, PowerStatement, SMS, AudioFile
+@st.cache_data
+def load_excel(file):
+    return pd.read_excel(file) if os.path.exists(file) else pd.DataFrame()
 
-objections_df = load_data(objections_file)
-brokerages_df = load_data(brokerages_file)
+objections_df = load_csv(OBJECTIONS_FILE)
+brokerages_df = load_excel(BROKERAGE_FILE)
+funnelpilot_df = load_excel(FUNNELPILOT_FILE)
 
 # --- Initialize Favorites ---
 if "favorites" not in st.session_state:
@@ -26,8 +29,9 @@ if "favorites" not in st.session_state:
 
 # --- Helper: Copy Button ---
 def copy_button(label, text):
-    st.code(text, language="text")
-    st.button(f"📋 Copy {label}", on_click=st.session_state.setdefault, args=("last_copy", text))
+    if text and isinstance(text, str):
+        st.code(text, language="text")
+        st.button(f"📋 Copy {label}", on_click=st.session_state.setdefault, args=("last_copy", text))
 
 # --- Navigation ---
 st.sidebar.title("Navigation")
@@ -38,7 +42,7 @@ if page == "Agent Objections":
     st.header("Agent Objections")
 
     if objections_df.empty:
-        st.warning("⚠️ No objection data file found.")
+        st.error(f"❌ Could not find {OBJECTIONS_FILE}. Please check that the file exists.")
     else:
         choice = st.selectbox("Select an Objection", objections_df["Objection"].tolist())
 
@@ -46,13 +50,15 @@ if page == "Agent Objections":
         st.subheader("Rebuttal")
         st.write(row["Rebuttal"])
 
-        st.subheader("Power Statement")
-        st.write(row["PowerStatement"])
+        if "PowerStatement" in objections_df.columns:
+            st.subheader("Power Statement")
+            st.write(row["PowerStatement"])
 
-        st.subheader("SMS Snippet")
-        copy_button("SMS", row["SMS"])
+        if "SMS" in objections_df.columns:
+            st.subheader("SMS Snippet")
+            copy_button("SMS", row["SMS"])
 
-        if pd.notna(row.get("AudioFile", "")) and os.path.exists(row["AudioFile"]):
+        if "AudioFile" in objections_df.columns and pd.notna(row["AudioFile"]) and os.path.exists(row["AudioFile"]):
             st.audio(row["AudioFile"])
 
         if st.button("⭐ Add to Favorites"):
@@ -62,8 +68,8 @@ if page == "Agent Objections":
 elif page == "Brokerage Comparison":
     st.header("Brokerage Comparison")
 
-    if brokerages_df.empty:
-        st.warning("⚠️ No brokerage comparison file found.")
+    if brokerages_df.empty or funnelpilot_df.empty:
+        st.error("❌ Could not find brokerage datasets. Please check filenames.")
     else:
         brokerages = brokerages_df["Brokerage"].unique().tolist()
         choice = st.selectbox("Select a Brokerage", brokerages)
@@ -74,8 +80,9 @@ elif page == "Brokerage Comparison":
         for _, row in rows.iterrows():
             st.write(f"**Benefit:** {row['Benefit']}")
             st.write(f"**Power Statement:** {row['PowerStatement']}")
-            copy_button("SMS", row["SMS"])
-            if pd.notna(row.get("AudioFile", "")) and os.path.exists(row["AudioFile"]):
+            if "SMS" in row:
+                copy_button("SMS", row["SMS"])
+            if "AudioFile" in row and pd.notna(row["AudioFile"]) and os.path.exists(row["AudioFile"]):
                 st.audio(row["AudioFile"])
             st.markdown("---")
 
@@ -91,4 +98,5 @@ elif page == "My Favorites":
     else:
         for fav_type, fav_item in st.session_state["favorites"]:
             st.write(f"⭐ {fav_type}: {fav_item}")
+
 
