@@ -1,21 +1,16 @@
-# app.py — Funnel Pilot Hub (clean + dataset builder)
-# Features:
-# - Top radio nav: Agent Objections | Brokerage Comparison | Favorites | Build Dataset
-# - Searchable, paginated radio lists (show ALL objections/brokerages)
-# - Browser Text-to-Speech ▶️ with global Rate, Pitch, Volume (no pyttsx3)
-# - Copy buttons for Rebuttal / One-Liner / SMS / Power Statement
-# - Favorites add/remove + export (Excel)
-# - Upload/Export datasets (xlsx/csv)
-# - NEW: Build Dataset tab to ingest .txt transcripts → suggest Objection/Rebuttal pairs → export CSV/XLSX
+# app.py — Funnel Pilot Hub (auto-detect datasets + full features)
+# Works with: Agent_Objections_Rebuttals.xlsx/.csv, Objection_Rebuttal_Master_500 (1).csv, etc.
+#             Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx (or CSV) and
+#             Top_25_Brokerage_Rebuttals_FunnelPilot.xlsx
+# No pyttsx3; audio is browser TTS with rate/pitch/volume controls.
 
 import streamlit as st
 import pandas as pd
-import os, io, json, math, re
+import os, io, json, math, re, glob
 import streamlit.components.v1 as components
 
-# -------------------- Utility UI elements --------------------
+# ---------- Tiny UI helpers ----------
 def tts_button(label, text, key, rate=1.0, pitch=1.0, volume=1.0):
-    """Browser Text-to-Speech play button (no server deps)."""
     safe_text  = json.dumps(str(text))
     safe_rate  = json.dumps(float(rate))
     safe_pitch = json.dumps(float(pitch))
@@ -36,9 +31,7 @@ def tts_button(label, text, key, rate=1.0, pitch=1.0, volume=1.0):
             u.volume = {safe_vol};
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(u);
-          }} catch(e) {{
-            alert("Text-to-speech not available in this browser.");
-          }}
+          }} catch(e) {{ alert("Text-to-speech not available in this browser."); }}
         }};
       }}
     </script>
@@ -46,7 +39,6 @@ def tts_button(label, text, key, rate=1.0, pitch=1.0, volume=1.0):
     components.html(html, height=48)
 
 def copy_button(label, text, key):
-    """Clipboard copy via JS (works on HTTPS)."""
     safe_text = json.dumps(str(text))
     btn_id = f"copy_{key}"
     html = f"""
@@ -71,62 +63,119 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     return buffer.getvalue()
 
-# -------------------- Data loading --------------------
-BROKERAGE_FILE = "Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx"
-AGENT_FILE_XLSX = "Agent_Objections_Rebuttals.xlsx"
-
+# ---------- Column contracts ----------
 BROKERAGE_COLS = ["Brokerage", "Funnel Pilot Rebuttal", "One-Liner", "SMS", "Power Statement"]
 AGENT_COLS     = ["Objection", "Rebuttal", "One-Liner", "SMS", "AudioPath"]
 
-@st.cache_data
-def load_excel_if_exists(path: str, expected_cols: list[str]) -> pd.DataFrame:
-    if os.path.exists(path):
-        try:
-            df = pd.read_excel(path)
-            for c in expected_cols:
-                if c not in df.columns:
-                    df[c] = ""
-            return df[expected_cols]
-        except Exception:
-            return pd.DataFrame(columns=expected_cols)
-    return pd.DataFrame(columns=expected_cols)
+# ---------- Discovery helpers ----------
+def try_load(path: str) -> pd.DataFrame | None:
+    try:
+        if path.lower().endswith(".csv"):
+            return pd.read_csv(path)
+        elif path.lower().endswith(".xlsx"):
+            return pd.read_excel(path)
+        else:
+            return None
+    except Exception:
+        return None
 
-# -------------------- Page + Global Controls --------------------
+def ensure_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    return df[cols]
+
+def discover_dataset(expected_cols: list[str], preferred_names: list[str], min_required: list[str]):
+    """
+    Returns (df, path, found_candidates)
+    - preferred_names are tried first if present
+    - then any *.xlsx/*.csv in cwd; we pick the first that has all min_required cols
+    """
+    cwd_files = set(glob.glob("*.xlsx") + glob.glob("*.csv"))
+    candidates = [p for p in preferred_names if os.path.exists(p)]
+    # Add all others, sorted by filename, but keep uniqueness
+    for f in sorted(cwd_files):
+        if f not in candidates:
+            candidates.append(f)
+
+    found_list = []
+    for p in candidates:
+        df = try_load(p)
+        if df is None:
+            continue
+        found_list.append(p)
+        lower = [c.strip().lower() for c in df.columns]
+        if all(mr.lower() in lower for mr in min_required):
+            return ensure_cols(df, expected_cols), p, found_list
+
+    # Nothing matched min_required; return empty with list of what we saw
+    return pd.DataFrame(columns=expected_cols), None, found_list
+
+# ---------- Page setup ----------
 st.set_page_config(page_title="Funnel Pilot Hub", layout="wide")
 st.title("🚀 Funnel Pilot Rebuttal & Brokerage Hub")
 
-# Global audio controls
+# Global audio controls (for all ▶️)
 with st.sidebar:
     st.markdown("### 🔊 Audio Controls")
     rate  = st.slider("Speed (rate)", 0.5, 2.0, 1.0, 0.05)
     pitch = st.slider("Tempo (pitch)", 0.5, 2.0, 1.0, 0.05)
     vol   = st.slider("Volume", 0.0, 1.0, 1.0, 0.05)
-    st.caption("Applies to every ▶️ button.")
+    st.caption("These apply to every ▶️ Play button in the app.")
 
-# Session data
-if "brokerage_df" not in st.session_state:
-    st.session_state.brokerage_df = load_excel_if_exists(BROKERAGE_FILE, BROKERAGE_COLS)
-if "agent_df" not in st.session_state:
-    st.session_state.agent_df = load_excel_if_exists(AGENT_FILE_XLSX, AGENT_COLS)
+# ---------- Initial auto-detect (once) ----------
+if "agent_df" not in st.session_state or "agent_path" not in st.session_state:
+    agent_df, agent_path, agent_seen = discover_dataset(
+        AGENT_COLS,
+        preferred_names=[
+            "Agent_Objections_Rebuttals.xlsx",
+            "Agent_Objections_Rebuttals.csv",
+            "Objection_Rebuttal_Master_500 (1).csv",
+            "Objection_Rebuttal_Master_500.csv",
+            "Objection_Rebuttal_Master_500.xlsx",
+        ],
+        min_required=["Objection","Rebuttal"]
+    )
+    st.session_state.agent_df = agent_df
+    st.session_state.agent_path = agent_path
+    st.session_state.agent_seen = agent_seen
+
+if "brokerage_df" not in st.session_state or "brokerage_path" not in st.session_state:
+    brokerage_df, brokerage_path, brokerage_seen = discover_dataset(
+        BROKERAGE_COLS,
+        preferred_names=[
+            "Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx",
+            "Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.csv",
+            "Top_25_Brokerage_Rebuttals_FunnelPilot.xlsx",
+            "Top_25_Brokerage_Rebuttals_FunnelPilot.csv",
+        ],
+        min_required=["Brokerage"]
+    )
+    st.session_state.brokerage_df = brokerage_df
+    st.session_state.brokerage_path = brokerage_path
+    st.session_state.brokerage_seen = brokerage_seen
+
 if "favorites" not in st.session_state:
     st.session_state.favorites = []
 if "builder_rows" not in st.session_state:
-    st.session_state.builder_rows = []  # for Build Dataset tab
+    st.session_state.builder_rows = []
 
-# -------------------- Data sources + upload/export --------------------
+# ---------- Data sources / upload ----------
 with st.expander("📦 Data Sources • Upload / Export"):
     c1, c2 = st.columns(2)
+
     with c1:
-        st.caption("**Brokerage Comparisons Dataset**")
-        st.write("Expected columns:", BROKERAGE_COLS)
+        st.caption("**Brokerage Comparisons**")
+        st.write("Loaded file:", st.session_state.brokerage_path or "— not detected —")
+        if st.session_state.get("brokerage_seen"):
+            st.caption("Files scanned: " + ", ".join(st.session_state.brokerage_seen))
         up_b = st.file_uploader("Upload Brokerage (xlsx/csv)", type=["xlsx","csv"], key="up_broker")
         if up_b is not None:
             try:
                 bdf = pd.read_csv(up_b) if up_b.name.lower().endswith(".csv") else pd.read_excel(up_b)
-                for c in BROKERAGE_COLS:
-                    if c not in bdf.columns: bdf[c] = ""
-                st.session_state.brokerage_df = bdf[BROKERAGE_COLS]
-                st.success("Brokerage dataset loaded.")
+                st.session_state.brokerage_df = ensure_cols(bdf, BROKERAGE_COLS)
+                st.session_state.brokerage_path = up_b.name
+                st.success(f"Loaded: {up_b.name}")
             except Exception as e:
                 st.error(f"Failed to load brokerage file: {e}")
         st.download_button(
@@ -134,17 +183,19 @@ with st.expander("📦 Data Sources • Upload / Export"):
             data=df_to_excel_bytes(st.session_state.brokerage_df),
             file_name="brokerage_dataset_current.xlsx",
         )
+
     with c2:
-        st.caption("**Agent Objections Dataset**")
-        st.write("Expected columns:", AGENT_COLS)
+        st.caption("**Agent Objections**")
+        st.write("Loaded file:", st.session_state.agent_path or "— not detected —")
+        if st.session_state.get("agent_seen"):
+            st.caption("Files scanned: " + ", ".join(st.session_state.agent_seen))
         up_a = st.file_uploader("Upload Agent Objections (xlsx/csv)", type=["xlsx","csv"], key="up_agent")
         if up_a is not None:
             try:
                 adf = pd.read_csv(up_a) if up_a.name.lower().endswith(".csv") else pd.read_excel(up_a)
-                for c in AGENT_COLS:
-                    if c not in adf.columns: adf[c] = ""
-                st.session_state.agent_df = adf[AGENT_COLS]
-                st.success("Agent objections dataset loaded.")
+                st.session_state.agent_df = ensure_cols(adf, AGENT_COLS)
+                st.session_state.agent_path = up_a.name
+                st.success(f"Loaded: {up_a.name}")
             except Exception as e:
                 st.error(f"Failed to load agent objections file: {e}")
         st.download_button(
@@ -153,23 +204,22 @@ with st.expander("📦 Data Sources • Upload / Export"):
             file_name="agent_objections_current.xlsx",
         )
 
-# -------------------- Top nav (radio) --------------------
+# ---------- Top nav ----------
 mode = st.radio(
     "Navigate:",
     ["🙋 Agent Objections", "🏢 Brokerage Comparison", "⭐ Favorites", "📥 Build Dataset"],
     horizontal=True
 )
 
-# -------------------- Agent Objections --------------------
+# ---------- Agent Objections ----------
 if mode == "🙋 Agent Objections":
     st.subheader("🙋 Agent Objection Handling")
+
     adf = st.session_state.agent_df
     if adf.empty:
-        st.warning("No agent objection data found. Place Agent_Objections_Rebuttals.xlsx next to this app or upload above.")
+        st.warning("No agent objection data found. Use the expander above to upload/select your dataset.")
     else:
         left, right = st.columns([2, 3])
-
-        # Search + pagination + radio list
         with left:
             q = st.text_input("Search objections / one-liners / SMS", "")
             filtered = (
@@ -196,29 +246,29 @@ if mode == "🙋 Agent Objections":
 
                 st.markdown("#### 🛠️ Full Rebuttal")
                 st.text_area("Rebuttal (copy as needed)", value=row["Rebuttal"], height=140, key="agent_reb_txt")
-                colr1, colr2 = st.columns(2)
-                with colr1:
-                    tts_button("Play Rebuttal", row["Rebuttal"], key="agent_rebuttal", rate=rate, pitch=pitch, volume=vol)
-                with colr2:
-                    copy_button("Rebuttal", row["Rebuttal"], key="agent_rebuttal")
+                c1, c2 = st.columns(2)
+                with c1:
+                    tts_button("Play Rebuttal", row["Rebuttal"], key="agent_reb", rate=rate, pitch=pitch, volume=vol)
+                with c2:
+                    copy_button("Rebuttal", row["Rebuttal"], key="agent_reb")
 
                 st.markdown("#### ⚡ One-Liner")
                 st.text_area("One-Liner (copy as needed)", value=row["One-Liner"], height=70, key="agent_ol_txt")
-                colr3, colr4 = st.columns(2)
-                with colr3:
-                    tts_button("Play One-Liner", row["One-Liner"], key="agent_oneliner", rate=rate, pitch=pitch, volume=vol)
-                with colr4:
-                    copy_button("One-Liner", row["One-Liner"], key="agent_oneliner")
+                c3, c4 = st.columns(2)
+                with c3:
+                    tts_button("Play One-Liner", row["One-Liner"], key="agent_ol", rate=rate, pitch=pitch, volume=vol)
+                with c4:
+                    copy_button("One-Liner", row["One-Liner"], key="agent_ol")
 
                 st.markdown("#### 📲 SMS Snippet")
                 st.text_area("SMS (copy as needed)", value=row["SMS"], height=70, key="agent_sms_txt")
-                colr5, colr6 = st.columns(2)
-                with colr5:
+                c5, c6 = st.columns(2)
+                with c5:
                     tts_button("Play SMS", row["SMS"], key="agent_sms", rate=rate, pitch=pitch, volume=vol)
-                with colr6:
+                with c6:
                     copy_button("SMS", row["SMS"], key="agent_sms")
 
-                # Optional file-based audio
+                # Optional local audio file support
                 if isinstance(row.get("AudioPath"), str) and row.get("AudioPath") and os.path.exists(row["AudioPath"]):
                     st.caption("🔊 Uploaded audio file")
                     st.audio(row["AudioPath"])
@@ -233,15 +283,14 @@ if mode == "🙋 Agent Objections":
                     })
                     st.success("Added to favorites!")
 
-# -------------------- Brokerage Comparison --------------------
+# ---------- Brokerage Comparison ----------
 elif mode == "🏢 Brokerage Comparison":
     st.subheader("🏢 Compare Funnel Pilot to Top Brokerages")
     bdf = st.session_state.brokerage_df
     if bdf.empty:
-        st.warning("No brokerage dataset found. Place Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx next to this app or upload above.")
+        st.warning("No brokerage dataset found. Use the expander above to upload/select your dataset.")
     else:
         left, right = st.columns([2, 3])
-
         with left:
             q2 = st.text_input("Search brokerages / content", "")
             filtered_b = (
@@ -270,17 +319,17 @@ elif mode == "🏢 Brokerage Comparison":
                 st.text_area("Broker Rebuttal (copy as needed)", value=rowb["Funnel Pilot Rebuttal"], height=140, key="brk_reb_txt")
                 c1, c2 = st.columns(2)
                 with c1:
-                    tts_button("Play Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal", rate=rate, pitch=pitch, volume=vol)
+                    tts_button("Play Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_reb", rate=rate, pitch=pitch, volume=vol)
                 with c2:
-                    copy_button("Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal")
+                    copy_button("Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_reb")
 
                 st.markdown("#### ⚡ One-Liner")
                 st.text_area("Broker One-Liner (copy as needed)", value=rowb["One-Liner"], height=70, key="brk_ol_txt")
                 c3, c4 = st.columns(2)
                 with c3:
-                    tts_button("Play Broker One-Liner", rowb["One-Liner"], key="broker_oneliner", rate=rate, pitch=pitch, volume=vol)
+                    tts_button("Play Broker One-Liner", rowb["One-Liner"], key="broker_ol", rate=rate, pitch=pitch, volume=vol)
                 with c4:
-                    copy_button("Broker One-Liner", rowb["One-Liner"], key="broker_oneliner")
+                    copy_button("Broker One-Liner", rowb["One-Liner"], key="broker_ol")
 
                 st.markdown("#### 📲 SMS Snippet")
                 st.text_area("Broker SMS (copy as needed)", value=rowb["SMS"], height=70, key="brk_sms_txt")
@@ -316,7 +365,7 @@ elif mode == "🏢 Brokerage Comparison":
                     })
                     st.success("Added to favorites!")
 
-# -------------------- Favorites --------------------
+# ---------- Favorites ----------
 elif mode == "⭐ Favorites":
     st.subheader("⭐ Your Favorites")
     if not st.session_state.favorites:
@@ -325,16 +374,15 @@ elif mode == "⭐ Favorites":
         for i, fav in enumerate(st.session_state.favorites):
             with st.container():
                 st.markdown(f"### {i+1}. {fav['title']} ({fav['type']})")
-
                 st.markdown("**Rebuttal:**")
                 st.write(fav["rebuttal"])
-                tts_button("Play", fav["rebuttal"], key=f"fav_rebuttal_{i}", rate=rate, pitch=pitch, volume=vol)
-                copy_button("Rebuttal", fav["rebuttal"], key=f"fav_rebuttal_{i}")
+                tts_button("Play", fav["rebuttal"], key=f"fav_reb_{i}", rate=rate, pitch=pitch, volume=vol)
+                copy_button("Rebuttal", fav["rebuttal"], key=f"fav_reb_{i}")
 
                 st.markdown("**One-Liner:**")
                 st.write(fav["oneliner"])
-                tts_button("Play", fav["oneliner"], key=f"fav_oneliner_{i}", rate=rate, pitch=pitch, volume=vol)
-                copy_button("One-Liner", fav["oneliner"], key=f"fav_oneliner_{i}")
+                tts_button("Play", fav["oneliner"], key=f"fav_ol_{i}", rate=rate, pitch=pitch, volume=vol)
+                copy_button("One-Liner", fav["oneliner"], key=f"fav_ol_{i}")
 
                 st.markdown("**SMS:**")
                 st.write(fav["sms"])
@@ -361,25 +409,17 @@ elif mode == "⭐ Favorites":
             file_name="favorites_export.xlsx",
         )
 
-# -------------------- Build Dataset (from transcripts) --------------------
+# ---------- Build Dataset (from transcripts) ----------
 elif mode == "📥 Build Dataset":
     st.subheader("📥 Build Agent_Objections_Rebuttals from Transcript .txt files")
-    st.caption("Upload one or more .txt transcripts. We'll auto-suggest Objection/Rebuttal pairs you can edit, approve, and export.")
+    st.caption("Upload one or more .txt transcripts. We’ll guess objection/rebuttal pairs; you can edit and export.")
     uploaded_txts = st.file_uploader("Upload transcript .txt files", type=["txt"], accept_multiple_files=True)
 
     def split_paragraphs(text: str):
-        # normalize line endings and split on blank lines
         parts = re.split(r"\n\s*\n", text.strip())
-        # strip stray whitespace
         return [p.strip() for p in parts if p.strip()]
 
     def guess_pairs(paragraphs):
-        """
-        Heuristics:
-        - If a paragraph starts with 'Objection:' use that (and the next paragraph as rebuttal if present).
-        - Otherwise, treat question-like paragraphs (ending with '?', or contains 'concern', 'worry', "don't") as objections
-          and pair with the next paragraph as rebuttal.
-        """
         pairs = []
         i = 0
         while i < len(paragraphs):
@@ -405,7 +445,7 @@ elif mode == "📥 Build Dataset":
             paras = split_paragraphs(text)
             candidates = guess_pairs(paras)
             if not candidates:
-                st.info(f"No obvious objection/rebuttal pairs found in **{uf.name}**. You can add manual rows below.")
+                st.info(f"No obvious objection/rebuttal pairs found in **{uf.name}**.")
             else:
                 st.success(f"Found {len(candidates)} candidate pairs in **{uf.name}**.")
                 st.session_state.builder_rows.extend(candidates)
@@ -432,7 +472,7 @@ elif mode == "📥 Build Dataset":
             else:
                 st.warning("Objection and Rebuttal required.")
 
-    # show table-like editor
+    # editable blocks + delete
     to_remove = []
     for idx, row in enumerate(st.session_state.builder_rows):
         with st.expander(f"{idx+1}. {row['Objection'][:90]}"):
@@ -450,19 +490,16 @@ elif mode == "📥 Build Dataset":
                 if st.button("🗑️ Delete", key=f"del_{idx}"):
                     to_remove.append(idx)
 
-    # delete marked rows
     if to_remove:
         for i in sorted(to_remove, reverse=True):
             st.session_state.builder_rows.pop(i)
         st.success("Removed selected rows.")
 
-    # export
     if st.session_state.builder_rows:
         out_df = pd.DataFrame(st.session_state.builder_rows, columns=AGENT_COLS)
         st.markdown("### 📤 Export")
         st.download_button("⬇️ Download CSV", data=out_df.to_csv(index=False).encode(), file_name="Agent_Objections_Rebuttals.csv", mime="text/csv")
         st.download_button("⬇️ Download Excel", data=df_to_excel_bytes(out_df), file_name="Agent_Objections_Rebuttals.xlsx")
-
         if st.button("📥 Load into App"):
             st.session_state.agent_df = out_df[AGENT_COLS]
             st.success("Loaded into the app. Switch to ‘🙋 Agent Objections’.")
