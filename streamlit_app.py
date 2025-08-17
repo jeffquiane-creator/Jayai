@@ -1,40 +1,94 @@
-
 import streamlit as st
 import pandas as pd
+import os
 
-st.set_page_config(layout="wide", page_title="Funnel Pilot — Agent Objections & Brokerage Comparison")
-st.title("🎯 Funnel Pilot — Agent Objections & Brokerage Comparison")
+# --- Page Config ---
+st.set_page_config(page_title="Agent Objections & Brokerage Compare", layout="wide")
 
-# Sidebar navigation
-nav = st.sidebar.radio("Navigate:", ["🙋‍♂️ Agent Objections", "🏢 Brokerage Comparison", "⭐ Favorites"])
+# --- Load Data ---
+@st.cache_data
+def load_data(file_path):
+    if file_path.endswith(".csv"):
+        return pd.read_csv(file_path)
+    elif file_path.endswith(".xlsx"):
+        return pd.read_excel(file_path)
+    return pd.DataFrame()
 
-# Load data from upload
-uploaded_file = st.file_uploader("Upload a CSV or Excel file", type=["csv", "xlsx"])
-df = None
-if uploaded_file is not None:
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
+objections_file = "agent_objections.xlsx"   # must have: Objection, Rebuttal, PowerStatement, SMS, AudioFile
+brokerages_file = "brokerage_comparison.xlsx"  # must have: Brokerage, Benefit, PowerStatement, SMS, AudioFile
+
+objections_df = load_data(objections_file)
+brokerages_df = load_data(brokerages_file)
+
+# --- Initialize Favorites ---
+if "favorites" not in st.session_state:
+    st.session_state["favorites"] = []
+
+# --- Helper: Copy Button ---
+def copy_button(label, text):
+    st.code(text, language="text")
+    st.button(f"📋 Copy {label}", on_click=st.session_state.setdefault, args=("last_copy", text))
+
+# --- Navigation ---
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to:", ["Agent Objections", "Brokerage Comparison", "My Favorites"])
+
+# --- Agent Objections Page ---
+if page == "Agent Objections":
+    st.header("Agent Objections")
+
+    if objections_df.empty:
+        st.warning("⚠️ No objection data file found.")
     else:
-        df = pd.read_excel(uploaded_file)
+        choice = st.selectbox("Select an Objection", objections_df["Objection"].tolist())
 
-if df is not None:
-    if nav == "🙋‍♂️ Agent Objections":
-        st.subheader("Agent Objection Handling")
-        for idx, row in df.iterrows():
-            st.markdown(f"**❓ Objection:** {row.get('Objection', '')}")
-            st.markdown(f"💬 **Rebuttal:** {row.get('Rebuttal', '')}")
-            st.markdown(f"💥 **Power Statement:** {row.get('PowerStatement', '')}")
-            if 'SMS' in row:
-                st.code(row['SMS'], language='text')
-            if 'AudioFile' in row and pd.notna(row['AudioFile']):
-                st.audio(row['AudioFile'], format='audio/mp3')
+        row = objections_df[objections_df["Objection"] == choice].iloc[0]
+        st.subheader("Rebuttal")
+        st.write(row["Rebuttal"])
 
-    elif nav == "🏢 Brokerage Comparison":
-        st.subheader("Brokerage Comparison")
-        st.dataframe(df)
+        st.subheader("Power Statement")
+        st.write(row["PowerStatement"])
 
-    elif nav == "⭐ Favorites":
-        st.subheader("Favorites (placeholder)")
-        st.info("This section will let you save and view your favorite rebuttals.")
-else:
-    st.warning("Please upload a dataset to begin.")
+        st.subheader("SMS Snippet")
+        copy_button("SMS", row["SMS"])
+
+        if pd.notna(row.get("AudioFile", "")) and os.path.exists(row["AudioFile"]):
+            st.audio(row["AudioFile"])
+
+        if st.button("⭐ Add to Favorites"):
+            st.session_state["favorites"].append(("Objection", choice))
+
+# --- Brokerage Comparison Page ---
+elif page == "Brokerage Comparison":
+    st.header("Brokerage Comparison")
+
+    if brokerages_df.empty:
+        st.warning("⚠️ No brokerage comparison file found.")
+    else:
+        brokerages = brokerages_df["Brokerage"].unique().tolist()
+        choice = st.selectbox("Select a Brokerage", brokerages)
+
+        rows = brokerages_df[brokerages_df["Brokerage"] == choice]
+
+        st.subheader(f"Comparison: {choice} vs. FunnelPilot")
+        for _, row in rows.iterrows():
+            st.write(f"**Benefit:** {row['Benefit']}")
+            st.write(f"**Power Statement:** {row['PowerStatement']}")
+            copy_button("SMS", row["SMS"])
+            if pd.notna(row.get("AudioFile", "")) and os.path.exists(row["AudioFile"]):
+                st.audio(row["AudioFile"])
+            st.markdown("---")
+
+        if st.button("⭐ Add Comparison to Favorites"):
+            st.session_state["favorites"].append(("Brokerage", choice))
+
+# --- Favorites Page ---
+elif page == "My Favorites":
+    st.header("My Favorites")
+
+    if not st.session_state["favorites"]:
+        st.info("No favorites saved yet.")
+    else:
+        for fav_type, fav_item in st.session_state["favorites"]:
+            st.write(f"⭐ {fav_type}: {fav_item}")
+
