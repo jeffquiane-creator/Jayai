@@ -1,13 +1,15 @@
-
 import streamlit as st
 import pandas as pd
-import os, json, io
+import os, json, io, math
 import streamlit.components.v1 as components
 
 # -------------------- Utility UI elements --------------------
-def tts_button(label, text, key):
+def tts_button(label, text, key, rate=1.0, pitch=1.0, volume=1.0):
     """Browser Text-to-Speech play button (no server deps)."""
-    safe_text = json.dumps(str(text))  # safe for JS
+    safe_text  = json.dumps(str(text))
+    safe_rate  = json.dumps(float(rate))
+    safe_pitch = json.dumps(float(pitch))
+    safe_vol   = json.dumps(float(volume))
     btn_id = f"tts_{key}"
     html = f"""
     <button id='{btn_id}' style='padding:8px 12px;border-radius:8px;border:1px solid #444;cursor:pointer;margin:6px 6px 0 0'>
@@ -19,6 +21,9 @@ def tts_button(label, text, key):
         el_{btn_id}.onclick = () => {{
           try {{
             const utter = new SpeechSynthesisUtterance({safe_text});
+            utter.rate   = {safe_rate};
+            utter.pitch  = {safe_pitch};
+            utter.volume = {safe_vol};
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(utter);
           }} catch(e) {{
@@ -53,21 +58,21 @@ def copy_button(label, text, key):
     """
     components.html(html, height=42)
 
-def df_to_excel_bytes(df):
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
     return buffer.getvalue()
 
-# -------------------- Data loading helpers --------------------
+# -------------------- Data loading --------------------
 BROKERAGE_FILE = "Top_25_Brokerage_Rebuttals_Final_with_Power_Statements.xlsx"
-AGENT_FILE = "Agent_Objections_Rebuttals.xlsx"
+AGENT_FILE     = "Agent_Objections_Rebuttals.xlsx"
 
 BROKERAGE_COLS = ["Brokerage", "Funnel Pilot Rebuttal", "One-Liner", "SMS", "Power Statement"]
-AGENT_COLS = ["Objection", "Rebuttal", "One-Liner", "SMS", "AudioPath"]
+AGENT_COLS     = ["Objection", "Rebuttal", "One-Liner", "SMS", "AudioPath"]
 
 @st.cache_data
-def load_excel_if_exists(path, expected_cols):
+def load_excel_if_exists(path: str, expected_cols: list[str]) -> pd.DataFrame:
     if os.path.exists(path):
         try:
             df = pd.read_excel(path)
@@ -82,6 +87,14 @@ def load_excel_if_exists(path, expected_cols):
 # -------------------- Page setup --------------------
 st.set_page_config(page_title="Funnel Pilot Hub", layout="wide")
 st.title("🚀 Funnel Pilot Rebuttal & Brokerage Hub")
+
+# global audio controls (apply to all Play buttons)
+with st.sidebar:
+    st.markdown("### 🔊 Audio Controls")
+    rate  = st.slider("Speed (rate)", 0.5, 2.0, 1.0, 0.05)
+    pitch = st.slider("Tempo (pitch)", 0.5, 2.0, 1.0, 0.05)
+    vol   = st.slider("Volume", 0.0, 1.0, 1.0, 0.05)
+    st.caption("These apply to every ▶️ Play button in the app.")
 
 # session state
 if "brokerage_df" not in st.session_state:
@@ -100,10 +113,7 @@ with st.expander("📦 Data Sources & Upload"):
         up_b = st.file_uploader("Upload Brokerage Excel (xlsx) or CSV", type=["xlsx", "csv"], key="up_broker")
         if up_b is not None:
             try:
-                if up_b.name.lower().endswith(".csv"):
-                    bdf = pd.read_csv(up_b)
-                else:
-                    bdf = pd.read_excel(up_b)
+                bdf = pd.read_csv(up_b) if up_b.name.lower().endswith(".csv") else pd.read_excel(up_b)
                 for c in BROKERAGE_COLS:
                     if c not in bdf.columns:
                         bdf[c] = ""
@@ -122,10 +132,7 @@ with st.expander("📦 Data Sources & Upload"):
         up_a = st.file_uploader("Upload Agent Objections Excel (xlsx) or CSV", type=["xlsx", "csv"], key="up_agent")
         if up_a is not None:
             try:
-                if up_a.name.lower().endswith(".csv"):
-                    adf = pd.read_csv(up_a)
-                else:
-                    adf = pd.read_excel(up_a)
+                adf = pd.read_csv(up_a) if up_a.name.lower().endswith(".csv") else pd.read_excel(up_a)
                 for c in AGENT_COLS:
                     if c not in adf.columns:
                         adf[c] = ""
@@ -150,56 +157,69 @@ with tab_objs:
         st.warning("No agent objection data found. Place Agent_Objections_Rebuttals.xlsx next to this app or upload above.")
     else:
         left, right = st.columns([2, 3])
+
+        # SEARCH + PAGINATION + RADIO LIST (no more slider)
         with left:
-            # search
             q = st.text_input("Search objections / one-liners / SMS", "")
-            if q.strip():
-                mask = adf.apply(lambda r: r.astype(str).str.contains(q, case=False).any(), axis=1)
-                choices = adf.loc[mask, "Objection"]
+            filt = adf.apply(lambda r: r.astype(str).str.contains(q, case=False).any(), axis=1) if q.strip() else pd.Series([True]*len(adf), index=adf.index)
+            filtered = adf.loc[filt].reset_index(drop=True)
+
+            per_page = 20
+            total_pages = max(1, math.ceil(len(filtered) / per_page))
+            page = st.number_input("Page", 1, total_pages, 1, 1, key="obj_page")
+            start, end = (page-1)*per_page, (page-1)*per_page + per_page
+            page_df = filtered.iloc[start:end]
+
+            # radio list of objections on the current page
+            options = page_df["Objection"].tolist()
+            if not options:
+                st.info("No results. Try a different search.")
+                selected_objection = None
             else:
-                choices = adf["Objection"]
-            objection = st.selectbox("Choose an objection:", choices.unique())
-            row = adf[adf["Objection"] == objection].iloc[0]
+                selected_objection = st.radio("Choose an objection:", options, key=f"objection_radio_{page}")
 
         with right:
-            st.markdown("#### 🛠️ Full Rebuttal")
-            st.text_area("Rebuttal (copy as needed)", value=row["Rebuttal"], height=140, key="agent_reb_txt")
-            colr1, colr2 = st.columns(2)
-            with colr1:
-                tts_button("Play Rebuttal", row["Rebuttal"], key="agent_rebuttal")
-            with colr2:
-                copy_button("Rebuttal", row["Rebuttal"], key="agent_rebuttal")
+            if selected_objection is not None:
+                row = adf[adf["Objection"] == selected_objection].iloc[0]
 
-            st.markdown("#### ⚡ One-Liner")
-            st.text_area("One-Liner (copy as needed)", value=row["One-Liner"], height=70, key="agent_ol_txt")
-            colr3, colr4 = st.columns(2)
-            with colr3:
-                tts_button("Play One-Liner", row["One-Liner"], key="agent_oneliner")
-            with colr4:
-                copy_button("One-Liner", row["One-Liner"], key="agent_oneliner")
+                st.markdown("#### 🛠️ Full Rebuttal")
+                st.text_area("Rebuttal (copy as needed)", value=row["Rebuttal"], height=140, key="agent_reb_txt")
+                colr1, colr2 = st.columns(2)
+                with colr1:
+                    tts_button("Play Rebuttal", row["Rebuttal"], key="agent_rebuttal", rate=rate, pitch=pitch, volume=vol)
+                with colr2:
+                    copy_button("Rebuttal", row["Rebuttal"], key="agent_rebuttal")
 
-            st.markdown("#### 📲 SMS Snippet")
-            st.text_area("SMS (copy as needed)", value=row["SMS"], height=70, key="agent_sms_txt")
-            colr5, colr6 = st.columns(2)
-            with colr5:
-                tts_button("Play SMS", row["SMS"], key="agent_sms")
-            with colr6:
-                copy_button("SMS", row["SMS"], key="agent_sms")
+                st.markdown("#### ⚡ One-Liner")
+                st.text_area("One-Liner (copy as needed)", value=row["One-Liner"], height=70, key="agent_ol_txt")
+                colr3, colr4 = st.columns(2)
+                with colr3:
+                    tts_button("Play One-Liner", row["One-Liner"], key="agent_oneliner", rate=rate, pitch=pitch, volume=vol)
+                with colr4:
+                    copy_button("One-Liner", row["One-Liner"], key="agent_oneliner")
 
-            # Optional uploaded audio support
-            if isinstance(row.get("AudioPath"), str) and row.get("AudioPath") and os.path.exists(row["AudioPath"]):
-                st.caption("🔊 Uploaded audio file")
-                st.audio(row["AudioPath"])
+                st.markdown("#### 📲 SMS Snippet")
+                st.text_area("SMS (copy as needed)", value=row["SMS"], height=70, key="agent_sms_txt")
+                colr5, colr6 = st.columns(2)
+                with colr5:
+                    tts_button("Play SMS", row["SMS"], key="agent_sms", rate=rate, pitch=pitch, volume=vol)
+                with colr6:
+                    copy_button("SMS", row["SMS"], key="agent_sms")
 
-            if st.button("⭐ Add to Favorites", key="fav_add_agent"):
-                st.session_state.favorites.append({
-                    "type": "objection",
-                    "title": row["Objection"],
-                    "rebuttal": row["Rebuttal"],
-                    "oneliner": row["One-Liner"],
-                    "sms": row["SMS"]
-                })
-                st.success("Added to favorites!")
+                # Optional file-based audio if provided
+                if isinstance(row.get("AudioPath"), str) and row.get("AudioPath") and os.path.exists(row["AudioPath"]):
+                    st.caption("🔊 Uploaded audio file")
+                    st.audio(row["AudioPath"])
+
+                if st.button("⭐ Add to Favorites", key="fav_add_agent"):
+                    st.session_state.favorites.append({
+                        "type": "objection",
+                        "title": row["Objection"],
+                        "rebuttal": row["Rebuttal"],
+                        "oneliner": row["One-Liner"],
+                        "sms": row["SMS"]
+                    })
+                    st.success("Added to favorites!")
 
 # ========== Brokerage Comparison ==========
 with tab_brok:
@@ -211,64 +231,75 @@ with tab_brok:
         left, right = st.columns([2, 3])
         with left:
             q2 = st.text_input("Search brokerages / content", "")
-            if q2.strip():
-                mask2 = bdf.apply(lambda r: r.astype(str).str.contains(q2, case=False).any(), axis=1)
-                options = bdf.loc[mask2, "Brokerage"]
+            filt2 = bdf.apply(lambda r: r.astype(str).str.contains(q2, case=False).any(), axis=1) if q2.strip() else pd.Series([True]*len(bdf), index=bdf.index)
+            filtered_b = bdf.loc[filt2].reset_index(drop=True)
+
+            per_page_b = 20
+            total_pages_b = max(1, math.ceil(len(filtered_b) / per_page_b))
+            page_b = st.number_input("Page", 1, total_pages_b, 1, 1, key="broker_page")
+            start_b, end_b = (page_b-1)*per_page_b, (page_b-1)*per_page_b + per_page_b
+            page_df_b = filtered_b.iloc[start_b:end_b]
+
+            options_b = page_df_b["Brokerage"].tolist()
+            if not options_b:
+                st.info("No results. Try a different search.")
+                selected_brokerage = None
             else:
-                options = bdf["Brokerage"]
-            brokerage = st.selectbox("Select a brokerage:", options.unique())
-            rowb = bdf[bdf["Brokerage"] == brokerage].iloc[0]
+                selected_brokerage = st.radio("Select a brokerage:", options_b, key=f"broker_radio_{page_b}")
 
         with right:
-            st.markdown("#### 🛠️ Full Rebuttal")
-            st.text_area("Broker Rebuttal (copy as needed)", value=rowb["Funnel Pilot Rebuttal"], height=140, key="brk_reb_txt")
-            c1, c2 = st.columns(2)
-            with c1:
-                tts_button("Play Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal")
-            with c2:
-                copy_button("Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal")
+            if selected_brokerage is not None:
+                rowb = bdf[bdf["Brokerage"] == selected_brokerage].iloc[0]
 
-            st.markdown("#### ⚡ One-Liner")
-            st.text_area("Broker One-Liner (copy as needed)", value=rowb["One-Liner"], height=70, key="brk_ol_txt")
-            c3, c4 = st.columns(2)
-            with c3:
-                tts_button("Play Broker One-Liner", rowb["One-Liner"], key="broker_oneliner")
-            with c4:
-                copy_button("Broker One-Liner", rowb["One-Liner"], key="broker_oneliner")
+                st.markdown("#### 🛠️ Full Rebuttal")
+                st.text_area("Broker Rebuttal (copy as needed)", value=rowb["Funnel Pilot Rebuttal"], height=140, key="brk_reb_txt")
+                c1, c2 = st.columns(2)
+                with c1:
+                    tts_button("Play Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal", rate=rate, pitch=pitch, volume=vol)
+                with c2:
+                    copy_button("Broker Rebuttal", rowb["Funnel Pilot Rebuttal"], key="broker_rebuttal")
 
-            st.markdown("#### 📲 SMS Snippet")
-            st.text_area("Broker SMS (copy as needed)", value=rowb["SMS"], height=70, key="brk_sms_txt")
-            c5, c6 = st.columns(2)
-            with c5:
-                tts_button("Play Broker SMS", rowb["SMS"], key="broker_sms")
-            with c6:
-                copy_button("Broker SMS", rowb["SMS"], key="broker_sms")
+                st.markdown("#### ⚡ One-Liner")
+                st.text_area("Broker One-Liner (copy as needed)", value=rowb["One-Liner"], height=70, key="brk_ol_txt")
+                c3, c4 = st.columns(2)
+                with c3:
+                    tts_button("Play Broker One-Liner", rowb["One-Liner"], key="broker_oneliner", rate=rate, pitch=pitch, volume=vol)
+                with c4:
+                    copy_button("Broker One-Liner", rowb["One-Liner"], key="broker_oneliner")
 
-            st.markdown("#### 💥 Power Statement")
-            st.text_area("Power Statement (copy as needed)", value=rowb["Power Statement"], height=70, key="brk_power_txt")
-            c7, c8 = st.columns(2)
-            with c7:
-                tts_button("Play Power Statement", rowb["Power Statement"], key="broker_power")
-            with c8:
-                copy_button("Power Statement", rowb["Power Statement"], key="broker_power")
+                st.markdown("#### 📲 SMS Snippet")
+                st.text_area("Broker SMS (copy as needed)", value=rowb["SMS"], height=70, key="brk_sms_txt")
+                c5, c6 = st.columns(2)
+                with c5:
+                    tts_button("Play Broker SMS", rowb["SMS"], key="broker_sms", rate=rate, pitch=pitch, volume=vol)
+                with c6:
+                    copy_button("Broker SMS", rowb["SMS"], key="broker_sms")
 
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.link_button("Watch the Demo", "https://honeybadgerpartner.com")
-            with col2:
-                st.link_button("Book a 3-Way Call", "https://3waycall.com")
+                st.markdown("#### 💥 Power Statement")
+                st.text_area("Power Statement (copy as needed)", value=rowb["Power Statement"], height=70, key="brk_power_txt")
+                c7, c8 = st.columns(2)
+                with c7:
+                    tts_button("Play Power Statement", rowb["Power Statement"], key="broker_power", rate=rate, pitch=pitch, volume=vol)
+                with c8:
+                    copy_button("Power Statement", rowb["Power Statement"], key="broker_power")
 
-            if st.button("⭐ Add to Favorites", key="fav_add_broker"):
-                st.session_state.favorites.append({
-                    "type": "brokerage",
-                    "title": rowb["Brokerage"],
-                    "rebuttal": rowb["Funnel Pilot Rebuttal"],
-                    "oneliner": rowb["One-Liner"],
-                    "sms": rowb["SMS"],
-                    "power": rowb["Power Statement"]
-                })
-                st.success("Added to favorites!")
+                st.markdown("---")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.link_button("Watch the Demo", "https://honeybadgerpartner.com")
+                with col2:
+                    st.link_button("Book a 3-Way Call", "https://3waycall.com")
+
+                if st.button("⭐ Add to Favorites", key="fav_add_broker"):
+                    st.session_state.favorites.append({
+                        "type": "brokerage",
+                        "title": rowb["Brokerage"],
+                        "rebuttal": rowb["Funnel Pilot Rebuttal"],
+                        "oneliner": rowb["One-Liner"],
+                        "sms": rowb["SMS"],
+                        "power": rowb["Power Statement"]
+                    })
+                    st.success("Added to favorites!")
 
 # ========== Favorites ==========
 with tab_favs:
@@ -280,20 +311,20 @@ with tab_favs:
             with st.container():
                 st.markdown(f"### {i+1}. {fav['title']} ({fav['type']})")
                 st.markdown(f"**Rebuttal:** {fav['rebuttal']}")
-                tts_button("Play", fav['rebuttal'], key=f"fav_rebuttal_{i}")
+                tts_button("Play", fav['rebuttal'], key=f"fav_rebuttal_{i}", rate=rate, pitch=pitch, volume=vol)
                 copy_button("Rebuttal", fav['rebuttal'], key=f"fav_rebuttal_{i}")
 
                 st.markdown(f"**One-Liner:** {fav['oneliner']}")
-                tts_button("Play", fav['oneliner'], key=f"fav_oneliner_{i}")
+                tts_button("Play", fav['oneliner'], key=f"fav_oneliner_{i}", rate=rate, pitch=pitch, volume=vol)
                 copy_button("One-Liner", fav['oneliner'], key=f"fav_oneliner_{i}")
 
                 st.markdown(f"**SMS:** {fav['sms']}")
-                tts_button("Play", fav['sms'], key=f"fav_sms_{i}")
+                tts_button("Play", fav['sms'], key=f"fav_sms_{i}", rate=rate, pitch=pitch, volume=vol)
                 copy_button("SMS", fav['sms'], key=f"fav_sms_{i}")
 
                 if fav.get("power"):
                     st.markdown(f"**Power Statement:** {fav['power']}")
-                    tts_button("Play", fav['power'], key=f"fav_power_{i}")
+                    tts_button("Play", fav['power'], key=f"fav_power_{i}", rate=rate, pitch=pitch, volume=vol)
                     copy_button("Power Statement", fav['power'], key=f"fav_power_{i}")
 
                 cols = st.columns([1,1,6])
@@ -309,3 +340,4 @@ with tab_favs:
             data=df_to_excel_bytes(fav_df),
             file_name="favorites_export.xlsx",
         )
+
